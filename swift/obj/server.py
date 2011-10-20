@@ -38,6 +38,7 @@ from eventlet import sleep, Timeout, TimeoutError, tpool
 from swift.common.utils import mkdirs, normalize_timestamp, \
     storage_directory, hash_path, renamer, fallocate, \
     split_path, drop_buffer_cache, get_logger, write_pickle
+from swift.common.lfs import get_lfs
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, check_mount, \
     check_float, check_utf8
@@ -106,14 +107,19 @@ class DiskFile(object):
     """
 
     def __init__(self, path, device, partition, account, container, obj,
-                 logger, keep_data_fp=False, disk_chunk_size=65536):
+                 logger, keep_data_fp=False, disk_chunk_size=65536,
+                 storage = None):
         self.disk_chunk_size = disk_chunk_size
         self.name = '/' + '/'.join((account, container, obj))
         name_hash = hash_path(account, container, obj)
         self.datadir = os.path.join(path, device,
                     storage_directory(DATADIR, partition, name_hash))
         self.device_path = os.path.join(path, device)
-        self.tmpdir = os.path.join(path, device, 'tmp')
+        if storage:
+            storage.setup_objdir(device, partition, name_hash)
+            self.tmpdir = storage.tmp_dir(device, partition, name_hash)
+        else:
+            self.tmpdir = os.path.join(path, device, DATADIR, partition, 'tmp')
         self.logger = logger
         self.metadata = {}
         self.meta_file = None
@@ -277,6 +283,7 @@ class DiskFile(object):
             self.drop_cache(fd, 0, int(metadata['Content-Length']))
         tpool.execute(os.fsync, fd)
         invalidate_hash(os.path.dirname(self.datadir))
+
         renamer(tmppath, os.path.join(self.datadir, timestamp + extension))
         self.metadata = metadata
 
@@ -368,6 +375,7 @@ class ObjectController(object):
                 conf.get('allowed_headers', \
                 default_allowed_headers).split(',') if i.strip() and \
                 i.strip().lower() not in DISALLOWED_HEADERS)
+        self.storage = get_lfs(conf, DATADIR)
 
     def container_update(self, op, account, container, obj, headers_in,
                          headers_out, objdevice):
@@ -430,10 +438,14 @@ class ObjectController(object):
                     not check_float(request.headers['x-timestamp']):
             return HTTPBadRequest(body='Missing timestamp', request=request,
                         content_type='text/plain')
+        obj_path = os.path.join(self.devices, device, DATADIR, partition)
+        if not os.path.exists(obj_path):
+            self.storage.setup_partition(device, partition)
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
-                        obj, self.logger, disk_chunk_size=self.disk_chunk_size)
+                        obj, self.logger, disk_chunk_size=self.disk_chunk_size,
+                        storage = self.storage)
 
         if file.is_deleted():
             response_class = HTTPNotFound
@@ -463,6 +475,9 @@ class ObjectController(object):
         except ValueError, err:
             return HTTPBadRequest(body=str(err), request=request,
                         content_type='text/plain')
+        obj_path = os.path.join(self.devices, device, DATADIR, partition)
+        if not os.path.exists(obj_path):
+            self.storage.setup_partition(device, partition)
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
         if 'x-timestamp' not in request.headers or \
@@ -473,7 +488,8 @@ class ObjectController(object):
         if error_response:
             return error_response
         file = DiskFile(self.devices, device, partition, account, container,
-                        obj, self.logger, disk_chunk_size=self.disk_chunk_size)
+                        obj, self.logger, disk_chunk_size=self.disk_chunk_size,
+                        storage = self.storage)
         orig_timestamp = file.metadata.get('X-Timestamp')
         upload_expiration = time.time() + self.max_upload_time
         etag = md5()
@@ -540,11 +556,15 @@ class ObjectController(object):
         except ValueError, err:
             return HTTPBadRequest(body=str(err), request=request,
                         content_type='text/plain')
+        obj_path = os.path.join(self.devices, device, DATADIR, partition)
+        if not os.path.exists(obj_path):
+            self.storage.setup_partition(device, partition)
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
                         obj, self.logger, keep_data_fp=True,
-                        disk_chunk_size=self.disk_chunk_size)
+                        disk_chunk_size=self.disk_chunk_size,
+                        storage = self.storage)
         if file.is_deleted():
             if request.headers.get('if-match') == '*':
                 return HTTPPreconditionFailed(request=request)
@@ -615,10 +635,14 @@ class ObjectController(object):
             resp.content_type = 'text/plain'
             resp.body = str(err)
             return resp
+        obj_path = os.path.join(self.devices, device, DATADIR, partition)
+        if not os.path.exists(obj_path):
+            self.storage.setup_partition(device, partition)
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
-                        obj, self.logger, disk_chunk_size=self.disk_chunk_size)
+                        obj, self.logger, disk_chunk_size=self.disk_chunk_size,
+                        storage = self.storage)
         if file.is_deleted():
             return HTTPNotFound(request=request)
         try:
@@ -655,11 +679,15 @@ class ObjectController(object):
                     not check_float(request.headers['x-timestamp']):
             return HTTPBadRequest(body='Missing timestamp', request=request,
                         content_type='text/plain')
+        obj_path = os.path.join(self.devices, device, DATADIR, partition)
+        if not os.path.exists(obj_path):
+            self.storage.setup_partition(device, partition)
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
         response_class = HTTPNoContent
         file = DiskFile(self.devices, device, partition, account, container,
-                        obj, self.logger, disk_chunk_size=self.disk_chunk_size)
+                        obj, self.logger, disk_chunk_size=self.disk_chunk_size,
+                        storage = self.storage)
         orig_timestamp = file.metadata.get('X-Timestamp')
         if file.is_deleted():
             response_class = HTTPNotFound
@@ -689,11 +717,11 @@ class ObjectController(object):
         except ValueError, e:
             return HTTPBadRequest(body=str(e), request=request,
                                   content_type='text/plain')
-        if self.mount_check and not check_mount(self.devices, device):
-            return Response(status='507 %s is not mounted' % device)
         path = os.path.join(self.devices, device, DATADIR, partition)
         if not os.path.exists(path):
-            mkdirs(path)
+            self.storage.setup_partition(device, partition)
+        if self.mount_check and not check_mount(self.devices, device):
+            return Response(status='507 %s is not mounted' % device)
         suffixes = suffix.split('-') if suffix else []
         _junk, hashes = tpool.execute(tpooled_get_hashes, path,
                                       recalculate=suffixes)
