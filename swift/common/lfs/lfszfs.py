@@ -1,5 +1,5 @@
 # Copyright (c) 2010-2011 OpenStack, LLC.
-# Copyright 2011 Nexenta Systems Inc.
+# Copyright (c) Nexenta Systems Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
